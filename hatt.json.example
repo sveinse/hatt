@@ -1,0 +1,26 @@
+// Example hatt.json file. Note that JSON files do not support comments
+// and all comments must be removed prior to usage.
+
+{
+    // URL to the MQTT broker
+    "broker": "test.mosquitto.org",
+
+    // List of named devices to start
+    "run": ["dmx"],
+
+    // List of defined devices
+    "devices": {
+
+        // Example device named "dmx"
+        "dmx": {
+            // Hatt type
+            "type": "ola",
+
+            // Name from
+            "name": "DMX Device",
+
+            // Base topic for the device
+            "topic": "homeassistant/light/dmx"
+        }
+    }
+}
