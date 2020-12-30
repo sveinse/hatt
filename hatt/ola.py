@@ -71,7 +71,7 @@ async def mqtt_connect(conf):
         print(f"Publish to {conf['config_topic']}")
         task = asyncio.create_task(
             client.publish(
-                conf["config_topic"], json.dumps(conf["config"]), retain=True
+                conf["config_topic"], json.dumps(conf["config"]), retain=True, qos=2
             )
         )
         tasks.add(task)

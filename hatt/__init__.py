@@ -20,7 +20,7 @@ def main():
 
     # Parse arguments
     parser = argparse.ArgumentParser(prog=PROG, description=DESCRIPTION)
-    parser.add_argument('--conf', '-c', metavar='FILE', help=f'Configuration file. Default: {CONFFILE}',
+    parser.add_argument('--conf', '--config', '-c', metavar='FILE', help=f'Configuration file. Default: {CONFFILE}',
                         default=CONFFILE)
     parser.add_argument('run', metavar='NAMES', nargs="*", help=f'Devices to run')
 
