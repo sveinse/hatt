@@ -20,7 +20,10 @@
             "name": "DMX Device",
 
             // Base topic for the device
-            "topic": "homeassistant/light/dmx"
+            "topic": "homeassistant/light/dmx",
+
+            // How often the config should be republished
+            "publish_interval": 60
         }
     }
 }

@@ -49,7 +49,7 @@ async def mqtt_connect(conf):
         stack.push_async_callback(cancel_tasks, tasks)
 
         # Create a LWT
-        will = Will(conf["status_topic"], payload=STATUS_OFFLINE)
+        will = Will(conf["status_topic"], payload=STATUS_OFFLINE, retain=True, qos=2)
 
         # Connect to the MQTT broker
         print(f"Connecting to {conf['broker']}")
@@ -57,35 +57,39 @@ async def mqtt_connect(conf):
         await stack.enter_async_context(client)
 
         # Push a LWT-like message before disconnecting from the broker
-        stack.push_async_callback(client.publish, conf["status_topic"], STATUS_OFFLINE)
+        stack.push_async_callback(client.publish, conf["status_topic"], STATUS_OFFLINE, retain=True, qos=2)
 
         # Messages that doesn't match a filter will get logged here
         messages = await stack.enter_async_context(client.unfiltered_messages())
-        task = asyncio.create_task(topic_event(conf, client, messages))
+        task = asyncio.create_task(subscribe_event(conf, client, messages))
         tasks.add(task)
 
         print(f"Subscribing to {conf['command_topic']}")
         await client.subscribe(conf["command_topic"])
 
         # Publish config to HA
-        print(f"Publish to {conf['config_topic']}")
-        task = asyncio.create_task(
-            client.publish(
-                conf["config_topic"], json.dumps(conf["config"]), retain=True, qos=2
-            )
-        )
-        tasks.add(task)
-
-        # Publish that we're online
-        print(f"Publish to {conf['status_topic']}")
-        task = asyncio.create_task(client.publish(conf["status_topic"], STATUS_ONLINE))
+        task = asyncio.create_task(publish_config(conf, client))
         tasks.add(task)
 
         # Collect everything
         await asyncio.gather(*tasks)
 
 
-async def topic_event(conf, client, messages):
+async def publish_config(conf, client):
+    while True:
+
+        print(f"Publish to {conf['config_topic']}")
+        await client.publish(
+            conf["config_topic"], json.dumps(conf["config"]), retain=True, qos=2
+        )
+
+        print(f"Publish to {conf['status_topic']}")
+        await client.publish(conf["status_topic"], STATUS_ONLINE, retain=True, qos=2)
+
+        await asyncio.sleep(conf['publish_interval'])
+
+
+async def subscribe_event(conf, client, messages):
 
     # The state cache
     state = {
@@ -120,7 +124,6 @@ async def topic_event(conf, client, messages):
                 )
                 w = int(state["white_value"])
                 y = int(state["brightness"]) / 255
-                y = 1
                 rgbw = [int(r * y), int(g * y), int(b * y), w]
 
             print(f"    DMX {rgbw}")
