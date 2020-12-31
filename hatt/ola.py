@@ -4,7 +4,7 @@ import asyncio
 from contextlib import AsyncExitStack
 from asyncio_mqtt import Client, MqttError, Will
 from ola.OlaClient import OlaClient
-import hatt
+from pprint import pprint
 
 
 CONFIG_TOPIC = "config"
@@ -13,19 +13,6 @@ STATUS_TOPIC = "status"
 STATE_TOPIC = "state"
 STATUS_ONLINE = "online"
 STATUS_OFFLINE = "offline"
-
-CONFIG = {
-    "~": "{topic}",
-    "name": "{name}",
-    "unique_id": "{id}",
-    "command_topic": f"~/{COMMAND_TOPIC}",
-    "state_topic": f"~/{STATE_TOPIC}",
-    "availability_topic": f"~/{STATUS_TOPIC}",
-    "schema": "json",
-    "rgb": True,
-    "white_value": True,
-    "brightness": True,
-}
 
 
 async def mqtt_connect(conf):
@@ -76,6 +63,10 @@ async def mqtt_connect(conf):
 
 
 async def publish_config(conf, client):
+
+    print("CONFIG:")
+    pprint(conf["config"])
+
     while True:
 
         print(f"Publish to {conf['config_topic']}")
@@ -150,16 +141,26 @@ async def main(conf):
 
 def init(conf):
 
-    # Insert the local vars needed
+    # MQTT DISCOVERY TOPIC
+    conf["config"] = {
+        "~": conf['topic'],
+        "name": conf['name'],
+        "device": conf['device'],
+        "unique_id": conf['unique_id'],
+        "command_topic": f"~/{COMMAND_TOPIC}",
+        "state_topic": f"~/{STATE_TOPIC}",
+        "availability_topic": f"~/{STATUS_TOPIC}",
+        "schema": "json",
+        "rgb": True,
+        "white_value": True,
+        "brightness": True,
+    }
+
+    # Other vars
     conf["config_topic"] = f"{conf['topic']}/{CONFIG_TOPIC}"
     conf["command_topic"] = f"{conf['topic']}/{COMMAND_TOPIC}"
     conf["status_topic"] = f"{conf['topic']}/{STATUS_TOPIC}"
     conf["state_topic"] = f"{conf['topic']}/{STATE_TOPIC}"
-    conf["config"] = CONFIG.copy()
-    for k, v in conf["config"].items():
-        if not isinstance(v, str):
-            continue
-        conf["config"][k] = v.format(**conf)
 
     # Return the main function coro
     return main(conf)
