@@ -593,12 +593,14 @@ class Hw50mqtt:
 
                         self.state['state'] = 'ON'
                         await self.hw50.power_on()
+                        await asyncio.sleep(1)
                         await self.queue.put(None)
 
                     elif payload == b'OFF' and state == 'ON':
 
                         self.state['state'] = 'OFF'
                         await self.hw50.power_off()
+                        await asyncio.sleep(1)
                         await self.queue.put(None)
 
 
