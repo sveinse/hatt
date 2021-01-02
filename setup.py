@@ -150,6 +150,7 @@ setup(
     # projects.
     extras_require={  # Optional
         'ola': ['ola'],
+        'hw50': ['pyserial-asyncio'],
         'dev': ['check-manifest', 'pylint', 'black'],
         'test': ['coverage'],
     },
