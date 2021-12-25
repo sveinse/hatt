@@ -5,25 +5,47 @@
     // URL to the MQTT broker
     "broker": "test.mosquitto.org",
 
+    // Number of seconds between reconnection attempts
+    "reconnect_interval": 3,
+
     // List of named devices to start
-    "run": ["dmx"],
+    "start": ["ola", "hw50"],
 
     // List of defined devices
     "devices": {
 
-        // Example device named "dmx"
-        "dmx": {
-            // Hatt type
-            "type": "ola",
+        // EXAMPLE hw50
+        "hw50": {
+            "module": "hw50",
+            "name": "Kino Prosjektor",
+            "unique_id": "kino_projector",
+            "port": "/dev/ttyUSB0",
+            "device": {
+                "identifiers": ["hatt_hw50"],
+                "manufacturer": "Sony",
+                "model": "VPL-HW50ES",
+                "name": "Kino Projector"
+            },
+            "topic": "homeassistant/switch/hw50",
+            "publish_interval": 600,
+            "status_interval": 60
+        },
 
-            // Name from
-            "name": "DMX Device",
-
-            // Base topic for the device
-            "topic": "homeassistant/light/dmx",
-
-            // How often the config should be republished
-            "publish_interval": 60
+        // EXAMPLE ola
+        "kino_led": {
+            "module": "ola",
+            "name": "Kino LED: Color",
+            "unique_id": "kino_led",
+            "device": {
+                "identifiers": ["hatt_ola"],
+                "manufacturer": "DMX",
+                "model": "DMX-RGBW-LEDS",
+                "name": "Kino LED"
+            },
+            "topic": "homeassistant/light/kino_led",
+            "publish_interval": 600,
+            "status_interval": 60
         }
+
     }
 }

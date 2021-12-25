@@ -1,11 +1,11 @@
 import asyncio
 import serial_asyncio
 import serial
-import json
 from queue import Queue
-from contextlib import AsyncExitStack
-from asyncio_mqtt import Client, MqttError, Will
+import asyncio_mqtt as mqtt
 from pprint import pprint
+
+from . import hatt
 
 
 # HW50 Protocol
@@ -512,118 +512,77 @@ class Hw50Emulator:
 
 
 
-CONFIG_TOPIC = "config"
-COMMAND_TOPIC = "set"
-STATUS_TOPIC = "status"
-STATE_TOPIC = "state"
-ATTRIBUTE_TOPIC = "attribute"
-STATUS_ONLINE = "online"
-STATUS_OFFLINE = "offline"
-
-class Hw50mqtt:
+class Hw50Hatt(hatt.Hatt):
 
     def __init__(self, conf, hw50):
-        self.mqtt = None
-        self.conf = conf
+        super().__init__(conf)
+
         self.hw50 = hw50
 
-        self.config_topic = f"{conf['topic']}/{CONFIG_TOPIC}"
-        self.command_topic = f"{conf['topic']}/{COMMAND_TOPIC}"
-        self.status_topic = f"{conf['topic']}/{STATUS_TOPIC}"
-        self.state_topic = f"{conf['topic']}/{STATE_TOPIC}"
-        self.attribute_topic = f"{conf['topic']}/{ATTRIBUTE_TOPIC}"
+        # MQTT DISCOVERY TOPIC
+        conf["config"] = {
+            "~": conf['topic'],
+            "name": conf['name'],
+            "device": conf['device'],
+            "unique_id": conf['unique_id'],
+            "command_topic": f"~/{self.COMMAND_TOPIC}",
+            "availability_topic": f"~/{self.STATUS_TOPIC}",
+            "state_topic": f"~/{self.STATE_TOPIC}",
+            "json_attributes_topic": f"~/{self.STATE_TOPIC}",
+            "value_template": "{{ value_json.state }}",
+        }
 
-        # State vars
-        self.status = STATUS_OFFLINE
         self.state = {
             "power_state": "Unknown",
             "status": "Unknown",
             "state": "OFF",
             "lamp_timer": 0,
         }
-
-        self.laststate = None
         self.queue = asyncio.Queue()
 
+    async def message_handler(self, messages):
 
-    async def main(self):
+        # Wait until the config has been sent
+        await self.config_event.wait()
 
-        async with AsyncExitStack() as stack:
+        # Loop over the subscriptions
+        async for message in messages:
+            topic = message.topic
+            payload = message.payload
 
-            # Create a LWT
-            will = Will(self.status_topic, payload=STATUS_OFFLINE, retain=True, qos=2)
+            print(f">>> TOPIC: {topic}")
+            print(f"    PAYLOAD: {payload}")
 
-            # Connect to the MQTT broker
-            print(f"Connecting to {self.conf['broker']}")
-            mqtt = Client(self.conf["broker"], will=will)
-            await stack.enter_async_context(mqtt)
-            self.mqtt = mqtt
+            if topic == self.HA_STATUS and payload == b'online':
+                await self.restart_config_publisher()
 
-            # Push a LWT-like message before disconnecting from the broker
-            stack.push_async_callback(mqtt.publish, will.topic, will.payload, will.retain, will.qos)
+            if topic == self.command_topic:
+                state = self.state['state']
 
-            # Get every subcribed messages
-            messages = await stack.enter_async_context(mqtt.unfiltered_messages())
+                if payload == b'ON' and state == 'OFF':
 
-            # Set the MQTT subscription
-            print(f"Subscribing to {self.command_topic}")
-            await mqtt.subscribe(self.command_topic)
-            await mqtt.subscribe('homeassistant/status')
+                    self.state['state'] = 'ON'
+                    await self.hw50.power_on()
+                    await asyncio.sleep(1)
+                    await self.queue.put(None)
 
-            # Create the publisher tasks
-            config_task = asyncio.create_task(self.config_publisher())
-            status_task = asyncio.create_task(self.status_publisher())
+                elif payload == b'OFF' and state == 'ON':
 
-            # Loop over the subscriptions
-            async for message in messages:
-                topic = message.topic
-                payload = message.payload
-
-                print(f">>> TOPIC: {topic}")
-                print(f"    PAYLOAD: {payload}")
-
-                if topic == 'homeassistant/status' and payload == b'online':
-                    config_task.cancel()
-                    config_task = asyncio.create_task(self.config_publisher())
-
-                if topic == self.command_topic:
-                    state = self.state['state']
-
-                    if payload == b'ON' and state == 'OFF':
-
-                        self.state['state'] = 'ON'
-                        await self.hw50.power_on()
-                        await asyncio.sleep(1)
-                        await self.queue.put(None)
-
-                    elif payload == b'OFF' and state == 'ON':
-
-                        self.state['state'] = 'OFF'
-                        await self.hw50.power_off()
-                        await asyncio.sleep(1)
-                        await self.queue.put(None)
-
-
-    async def config_publisher(self):
-
-        print("CONFIG:")
-        pprint(self.conf["config"])
-
-        # Ensure they are present before pushing the config
-        await self.publish_state(force=True)
-        await self.publish_status(self.status, force=True)
-
-        while True:
-            await self.publish_config()
-            await asyncio.sleep(self.conf['publish_interval'])
-
+                    self.state['state'] = 'OFF'
+                    await self.hw50.power_off()
+                    await asyncio.sleep(1)
+                    await self.queue.put(None)
 
     async def status_publisher(self):
-        interval = self.conf['status_interval']
+
+        # Wait until the config has been sent
+        await self.config_event.wait()
+
         while True:
             try:
                 interval = self.conf['status_interval']
                 do_full_status = True
+
                 power = await self.hw50.get_status_power()
 
                 if power not in (
@@ -652,83 +611,39 @@ class Hw50mqtt:
                     lamp = await self.hw50.command(LAMP_TIMER)
                     self.state['lamp_timer'] = lamp
 
-                await self.publish_status(STATUS_ONLINE)
+                await self.publish_status(self.STATUS_ONLINE)
 
             except TimeoutError:
-                await self.publish_status(STATUS_OFFLINE)
+                await self.publish_status(self.STATUS_OFFLINE)
 
             finally:
                 await self.publish_state()
 
             try:
-                #await asyncio.sleep(self.conf['status_interval'])
                 await asyncio.wait_for(self.queue.get(), interval)
             except asyncio.TimeoutError:
                 pass
 
 
-    async def publish_config(self):
-
-        print(f"<<< PUBLISH {self.config_topic}")
-        pprint(self.conf['config'])
-        return await self.mqtt.publish(
-            self.config_topic, json.dumps(self.conf['config']), retain=True, qos=2
-        )
-
-    async def publish_status(self, status=STATUS_OFFLINE, force=False):
-
-        if force or self.status != status:
-            self.status = status
-            print(f"<<< PUBLISH {self.status_topic} {status}")
-            return await self.mqtt.publish(
-                self.status_topic, status, retain=True, qos=2
-            )
-
-    async def publish_state(self, force=False):
-
-        if force or self.state != self.laststate:
-            self.laststate = self.state.copy()
-            print(f"<<< PUBLISH {self.state_topic}")
-            pprint(self.state)
-            return await self.mqtt.publish(
-                self.state_topic, json.dumps(self.state), retain=True
-            )
-
-
 async def main(conf):
     print(f"{conf['id']}: Running hw50 device")
 
+    # Open protocol handler
+    _, hw50 = await Hw50.connect(conf['port'])
+
+    # Protocol testing
     #hw50 = Hw50()
     #Hw50Emulator(hw50)
 
-    _, hw50 = await Hw50.connect(conf['port'])
-    mqtt = Hw50mqtt(conf, hw50)
-
-    reconnect_interval = 3
+    reconnect = False
+    reconnect_interval = conf['reconnect_interval']
     while True:
         try:
-            await mqtt.main()
-        except MqttError as error:
+            if reconnect:
+                await asyncio.sleep(reconnect_interval)
+
+            await Hw50Hatt(conf, hw50).main()
+
+        except mqtt.MqttError as error:
             print(f'Error "{error}". Reconnecting in {reconnect_interval} seconds.')
-        finally:
-            await asyncio.sleep(reconnect_interval)
-
-
-def init(conf):
-
-    # MQTT DISCOVERY TOPIC
-    conf["config"] = {
-        "~": conf['topic'],
-        "name": conf['name'],
-        "device": conf['device'],
-        "unique_id": conf['unique_id'],
-        "command_topic": f"~/{COMMAND_TOPIC}",
-        "availability_topic": f"~/{STATUS_TOPIC}",
-        "state_topic": f"~/{STATE_TOPIC}",
-        "json_attributes_topic": f"~/{STATE_TOPIC}",
-        "value_template": "{{ value_json.state }}",
-
-    }
-
-    # Return the main function coro
-    return main(conf)
+            reconnect = True

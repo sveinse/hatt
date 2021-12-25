@@ -22,7 +22,7 @@ def main():
     parser = argparse.ArgumentParser(prog=PROG, description=DESCRIPTION)
     parser.add_argument('--conf', '--config', '-c', metavar='FILE', help=f'Configuration file. Default: {CONFFILE}',
                         default=CONFFILE)
-    parser.add_argument('run', metavar='NAMES', nargs="*", help=f'Devices to run')
+    parser.add_argument('devices', metavar='NAMES', nargs="*", help='Devices to start')
 
     opts = parser.parse_args()
 
@@ -30,21 +30,22 @@ def main():
     with open(opts.conf, 'r') as f:
         conf = json.load(f)
 
-    devices = opts.run or conf.get('run', [])
+    devices = opts.devices or conf.get('start', [])
     if not devices:
-        parser.error(f"Missing device")
+        parser.error("Missing device")
 
     mains = []
     for device in devices:
-        if device not in conf.get('devices',{}):
+        if device not in conf.get('devices', {}):
             parser.error(f"{opts.conf}: No device '{device}' found")
 
         data = conf['devices'][device]
         data['id'] = device
         data['broker'] = conf['broker']
+        data['reconnect_interval'] = conf.get('reconnect_interval', 3)
 
-        plugin = import_module('hatt.' + data['type'])
-        mains.append(plugin.init(data))
+        plugin = import_module('hatt.' + data['module'])
+        mains.append(plugin.main(data))
 
     # Run the main loop
     asyncio.run(amain(mains))

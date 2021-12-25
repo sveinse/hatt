@@ -1,166 +1,116 @@
 import json
 import array
 import asyncio
-from contextlib import AsyncExitStack
-from asyncio_mqtt import Client, MqttError, Will
+import asyncio_mqtt as mqtt
 from ola.OlaClient import OlaClient
 from pprint import pprint
 
-
-CONFIG_TOPIC = "config"
-COMMAND_TOPIC = "set"
-STATUS_TOPIC = "status"
-STATE_TOPIC = "state"
-STATUS_ONLINE = "online"
-STATUS_OFFLINE = "offline"
+from . import hatt
 
 
-async def mqtt_connect(conf):
-
-    async with AsyncExitStack() as stack:
-
-        # Keep track of the asyncio tasks that we create, so that
-        # we can cancel them on exit
-        tasks = set()
-
-        async def cancel_tasks(tasks):
-            for task in tasks:
-                if task.done():
-                    continue
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-        stack.push_async_callback(cancel_tasks, tasks)
-
-        # Create a LWT
-        will = Will(conf["status_topic"], payload=STATUS_OFFLINE, retain=True, qos=2)
-
-        # Connect to the MQTT broker
-        print(f"Connecting to {conf['broker']}")
-        client = Client(conf["broker"], will=will)
-        await stack.enter_async_context(client)
-
-        # Push a LWT-like message before disconnecting from the broker
-        stack.push_async_callback(client.publish, conf["status_topic"], STATUS_OFFLINE, retain=True, qos=2)
-
-        # Messages that doesn't match a filter will get logged here
-        messages = await stack.enter_async_context(client.unfiltered_messages())
-        task = asyncio.create_task(subscribe_event(conf, client, messages))
-        tasks.add(task)
-
-        print(f"Subscribing to {conf['command_topic']}")
-        await client.subscribe(conf["command_topic"])
-
-        # Publish config to HA
-        task = asyncio.create_task(publish_config(conf, client))
-        tasks.add(task)
-
-        # Collect everything
-        await asyncio.gather(*tasks)
+class Array:
+    ''' Hack as ola relies on calling array.array().tostring()
+        which recent py doesn't support
+    '''
+    def __init__(self, data):
+        self.d = data
+    def tostring(self):
+        return array.array("B", self.d).tobytes()
 
 
-async def publish_config(conf, client):
+class OlaHatt(hatt.Hatt):
 
-    print("CONFIG:")
-    pprint(conf["config"])
+    def __init__(self, conf):
+        super().__init__(conf)
 
-    while True:
+        # MQTT DISCOVERY TOPIC
+        conf["config"] = {
+            "~": conf['topic'],
+            "name": conf['name'],
+            "device": conf['device'],
+            "unique_id": conf['unique_id'],
+            "command_topic": f"~/{self.COMMAND_TOPIC}",
+            "state_topic": f"~/{self.STATE_TOPIC}",
+            "availability_topic": f"~/{self.STATUS_TOPIC}",
+            "schema": "json",
+            "rgb": True,
+            "white_value": True,
+            "brightness": True,
+            "color_temp": False
+            #"color_mode": True,
+            #"supported_color_modes": ["rgbw"]
+        }
 
-        print(f"Publish to {conf['config_topic']}")
-        await client.publish(
-            conf["config_topic"], json.dumps(conf["config"]), retain=True, qos=2
-        )
+        self.state = {
+            "color": {"r": 0, "g": 0, "b": 0},
+            "brightness": 0,
+            "white_value": 0,
+            "state": "OFF",
+        }
 
-        print(f"Publish to {conf['status_topic']}")
-        await client.publish(conf["status_topic"], STATUS_ONLINE, retain=True, qos=2)
+    async def message_handler(self, messages):
 
-        await asyncio.sleep(conf['publish_interval'])
+        # Wait until the config has been sent
+        await self.config_event.wait()
 
+        # Loop over the subscriptions
+        async for message in messages:
+            topic = message.topic
+            payload = message.payload
 
-async def subscribe_event(conf, client, messages):
+            print(f">>> TOPIC: {topic}")
+            print(f"    PAYLOAD: {payload}")
 
-    # The state cache
-    state = {
-        "color": {"r": 0, "g": 0, "b": 0},
-        "brightness": 0,
-        "white_value": 0,
-        "state": "OFF",
-    }
+            if topic == self.HA_STATUS and payload == b"online":
+                await self.restart_config_publisher()
 
-    async for message in messages:
-        print(f">>> TOPIC: {message.topic}")
-        print(f"    PAYLOAD: {message.payload}")
+            if topic == self.command_topic:
+                state = self.state
+                data = json.loads(payload)
 
-        if message.topic == conf["command_topic"]:
-            data = json.loads(message.payload)
+                # Copy the select vars from the data to the local state
+                for var in ("color", "brightness", "white_value", "state"):
+                    if var in data:
+                        state[var] = data[var]
 
-            if "color" in data:
-                state["color"] = data["color"]
-            if "brightness" in data:
-                state["brightness"] = data["brightness"]
-            if "white_value" in data:
-                state["white_value"] = data["white_value"]
-            if "state" in data:
-                state["state"] = data["state"]
+                print(f"    STATE: {state}")
 
-            rgbw = [0] * 4
-            if state["state"] == "ON":
-                r, g, b = (
-                    int(state["color"]["r"]),
-                    int(state["color"]["g"]),
-                    int(state["color"]["b"]),
-                )
-                w = int(state["white_value"])
-                y = int(state["brightness"]) / 255
-                rgbw = [int(r * y), int(g * y), int(b * y), w]
+                # Default everything off
+                dmx = [0] * 4
 
-            print(f"    DMX {rgbw}")
+                if state["state"] == "ON":
+                    r = int(state["color"]["r"])
+                    g = int(state["color"]["g"])
+                    b = int(state["color"]["b"])
+                    w = int(state["white_value"])
+                    y = int(state["brightness"]) / 255
 
-            # Update the physical HW
-            OlaClient().SendDmx(0, array.array("B", rgbw), None)
+                    # If brightness is set but no color, set it to pure white
+                    if y > 0 and r == 0 and g == 0 and b == 0:
+                        r = g = b = 255
 
-            # Publish the state
-            await client.publish(conf["state_topic"], json.dumps(state))
+                    # RGBW values are hardcoded into DMX channels 0-3
+                    dmx = [int(r * y), int(g * y), int(b * y), w]
+
+                # Update the DMX data. Universe 0
+                print(f"    DMX {dmx}")
+                OlaClient().SendDmx(0, Array(dmx), None)
+
+                await self.publish_state()
 
 
 async def main(conf):
     print(f"{conf['id']}: Running ola device")
 
-    reconnect_interval = 3
+    reconnect = False
+    reconnect_interval = conf['reconnect_interval']
     while True:
         try:
-            await mqtt_connect(conf)
-        except MqttError as error:
+            if reconnect:
+                await asyncio.sleep(reconnect_interval)
+
+            await OlaHatt(conf).main()
+
+        except mqtt.MqttError as error:
             print(f'Error "{error}". Reconnecting in {reconnect_interval} seconds.')
-        finally:
-            await asyncio.sleep(reconnect_interval)
-
-
-def init(conf):
-
-    # MQTT DISCOVERY TOPIC
-    conf["config"] = {
-        "~": conf['topic'],
-        "name": conf['name'],
-        "device": conf['device'],
-        "unique_id": conf['unique_id'],
-        "command_topic": f"~/{COMMAND_TOPIC}",
-        "state_topic": f"~/{STATE_TOPIC}",
-        "availability_topic": f"~/{STATUS_TOPIC}",
-        "schema": "json",
-        "rgb": True,
-        "white_value": True,
-        "brightness": True,
-    }
-
-    # Other vars
-    conf["config_topic"] = f"{conf['topic']}/{CONFIG_TOPIC}"
-    conf["command_topic"] = f"{conf['topic']}/{COMMAND_TOPIC}"
-    conf["status_topic"] = f"{conf['topic']}/{STATUS_TOPIC}"
-    conf["state_topic"] = f"{conf['topic']}/{STATE_TOPIC}"
-
-    # Return the main function coro
-    return main(conf)
+            reconnect = True

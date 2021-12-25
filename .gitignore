@@ -4,3 +4,4 @@ venv/
 __*/
 *.whl
 hatt.json
+__*.py
